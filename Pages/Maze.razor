@@ -1,0 +1,238 @@
+@page "/"
+@using System.Text
+@using MazeRunner.Models
+@inject IJSRuntime JS
+@implements IDisposable
+
+<PageTitle>Maze</PageTitle>
+
+<h1>Maze Generator</h1>
+<p>Watch the maze carve itself with a randomized recursive backtracker, then race to the green square. Arrow keys / WASD to move, <strong>Solve</strong> to reveal the shortest path.</p>
+
+<div class="row g-3 align-items-end mb-3">
+    <div class="col-auto">
+        <label class="form-label mb-0">Columns</label>
+        <input type="number" class="form-control" style="width:5rem" min="5" max="60" @bind="Cols" disabled="@Busy" />
+    </div>
+    <div class="col-auto">
+        <label class="form-label mb-0">Rows</label>
+        <input type="number" class="form-control" style="width:5rem" min="5" max="60" @bind="Rows" disabled="@Busy" />
+    </div>
+    <div class="col-auto">
+        <label class="form-label mb-0">Animation speed</label>
+        <input type="range" class="form-range" style="width:10rem" min="0" max="30" @bind="DelayMs" @bind:event="oninput" disabled="@Busy" />
+    </div>
+    <div class="col-auto">
+        <button class="btn btn-primary" @onclick="GenerateAsync" disabled="@Busy">Generate New Maze</button>
+    </div>
+    <div class="col-auto">
+        <button class="btn btn-outline-secondary" @onclick="SolveAsync" disabled="@(Busy || _solved)">Solve</button>
+    </div>
+    <div class="col-auto">
+        <button class="btn btn-outline-secondary" @onclick="ResetPlayer" disabled="@Busy">Reset Player</button>
+    </div>
+</div>
+
+<p>
+    Moves: <strong>@_moves</strong>
+    @if (_won)
+    {
+        <span class="badge text-bg-success ms-2">Solved in @_moves moves! 🎉</span>
+    }
+</p>
+
+<canvas id="@CanvasId" tabindex="0" style="outline: 1px solid #dee2e6; touch-action: none;" @onkeydown="OnKeyDownAsync" @onkeydown:preventDefault="true"></canvas>
+
+@code {
+    private const string CanvasId = "maze-canvas";
+    private const int CellSize = 24;
+
+    private int Cols { get; set; } = 20;
+    private int Rows { get; set; } = 15;
+    private int DelayMs { get; set; } = 4;
+
+    private MazeGrid _grid = new(20, 15);
+    private CancellationTokenSource? _cts;
+    private bool Busy { get; set; }
+
+    private int _playerX, _playerY, _moves;
+    private bool _won;
+    private bool _solved;
+    private bool _walkPhase;
+    private MazeCell? _currentCell;
+    private IReadOnlyList<(int X, int Y)>? _path;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await GenerateAsync();
+        }
+    }
+
+    private async Task GenerateAsync()
+    {
+        _cts?.Cancel();
+        _cts = new CancellationTokenSource();
+        Busy = true;
+        _solved = false;
+        _won = false;
+        _moves = 0;
+        _path = null;
+        _playerX = 0;
+        _playerY = 0;
+        _grid = new MazeGrid(Math.Clamp(Cols, 5, 60), Math.Clamp(Rows, 5, 60));
+        StateHasChanged();
+        await DrawAsync();
+
+        try
+        {
+            var rng = new Random();
+            await foreach (var evt in MazeGenerator.GenerateAsync(_grid, rng, DelayMs, _cts.Token))
+            {
+                _currentCell = evt.Kind == MazeGenEventKind.Done ? null : evt.Current;
+                await DrawAsync();
+            }
+        }
+        catch (OperationCanceledException) { }
+        finally
+        {
+            _currentCell = null;
+            Busy = false;
+            StateHasChanged();
+            await DrawAsync();
+            await JS.InvokeVoidAsync("mazeCanvas.focus", CanvasId);
+        }
+    }
+
+    private async Task SolveAsync()
+    {
+        _cts?.Cancel();
+        _cts = new CancellationTokenSource();
+        Busy = true;
+        StateHasChanged();
+
+        try
+        {
+            await foreach (var evt in MazeSolver.SolveAsync(_grid, DelayMs, _cts.Token))
+            {
+                if (evt.Kind == MazeSolveEventKind.Done)
+                {
+                    _path = evt.Path;
+                    _solved = true;
+                }
+                else
+                {
+                    _currentCell = evt.Current;
+                }
+                await DrawAsync();
+            }
+        }
+        catch (OperationCanceledException) { }
+        finally
+        {
+            _currentCell = null;
+            _grid.ResetVisited();
+            Busy = false;
+            StateHasChanged();
+            await DrawAsync();
+        }
+    }
+
+    private void ResetPlayer()
+    {
+        _playerX = 0;
+        _playerY = 0;
+        _moves = 0;
+        _won = false;
+        _ = DrawAsync();
+    }
+
+    private async Task OnKeyDownAsync(KeyboardEventArgs e)
+    {
+        if (Busy || _won) return;
+
+        Direction? dir = e.Key switch
+        {
+            "ArrowUp" or "w" or "W" => Direction.North,
+            "ArrowDown" or "s" or "S" => Direction.South,
+            "ArrowLeft" or "a" or "A" => Direction.West,
+            "ArrowRight" or "d" or "D" => Direction.East,
+            _ => null
+        };
+        if (dir is null) return;
+
+        var cell = _grid[_playerX, _playerY];
+        var blocked = dir switch
+        {
+            Direction.North => cell.Walls.HasFlag(Walls.North),
+            Direction.South => cell.Walls.HasFlag(Walls.South),
+            Direction.East => cell.Walls.HasFlag(Walls.East),
+            Direction.West => cell.Walls.HasFlag(Walls.West),
+            _ => true
+        };
+        if (blocked) return;
+
+        (_playerX, _playerY) = dir switch
+        {
+            Direction.North => (_playerX, _playerY - 1),
+            Direction.South => (_playerX, _playerY + 1),
+            Direction.East => (_playerX + 1, _playerY),
+            Direction.West => (_playerX - 1, _playerY),
+            _ => (_playerX, _playerY)
+        };
+        _moves++;
+        _walkPhase = !_walkPhase;
+
+        if (_playerX == _grid.Width - 1 && _playerY == _grid.Height - 1)
+        {
+            _won = true;
+        }
+
+        await DrawAsync(playerMoving: true);
+    }
+
+    private async Task DrawAsync(bool playerMoving = false)
+    {
+        var pathSet = _path is null ? null : new HashSet<(int, int)>(_path.Select(p => (p.X, p.Y)));
+
+        // Two flat hex-digit strings (one char per cell) instead of an array of per-cell JSON
+        // objects: encoding/parsing ~2 short strings is far cheaper than (de)serializing
+        // width*height objects on every single generation/solve animation frame.
+        var walls = new StringBuilder(_grid.Width * _grid.Height);
+        var state = new StringBuilder(_grid.Width * _grid.Height);
+        for (var y = 0; y < _grid.Height; y++)
+        {
+            for (var x = 0; x < _grid.Width; x++)
+            {
+                var cell = _grid[x, y];
+                walls.Append(((int)cell.Walls).ToString("x"));
+
+                var s = 0;
+                if (cell.Visited) s |= 1;
+                if (ReferenceEquals(_currentCell, cell)) s |= 2;
+                if (pathSet?.Contains((x, y)) ?? false) s |= 4;
+                state.Append(s.ToString("x"));
+            }
+        }
+
+        var dto = new
+        {
+            cols = _grid.Width,
+            rows = _grid.Height,
+            cellSize = CellSize,
+            walls = walls.ToString(),
+            state = state.ToString(),
+            playerX = _playerX,
+            playerY = _playerY,
+            playerMoving,
+            playerPhase = _walkPhase,
+            goalX = _grid.Width - 1,
+            goalY = _grid.Height - 1
+        };
+
+        await JS.InvokeVoidAsync("mazeCanvas.draw", CanvasId, dto);
+    }
+
+    public void Dispose() => _cts?.Cancel();
+}

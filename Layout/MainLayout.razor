@@ -1,0 +1,25 @@
+@inherits LayoutComponentBase
+<div class="page">
+    <div class="sidebar @(SidebarCollapsed ? "collapsed" : "")">
+        <NavMenu />
+    </div>
+
+    <main>
+        <div class="top-row px-4">
+            <button class="btn btn-link sidebar-toggle" title="@(SidebarCollapsed ? "Show navigation" : "Hide navigation")" @onclick="ToggleSidebar">
+                <span class="bi @(SidebarCollapsed ? "bi-sidebar-expand" : "bi-sidebar-collapse")" aria-hidden="true"></span>
+            </button>
+            <a href="https://learn.microsoft.com/aspnet/core/" target="_blank">About</a>
+        </div>
+
+        <article class="content px-4">
+            @Body
+        </article>
+    </main>
+</div>
+
+@code {
+    private bool SidebarCollapsed { get; set; }
+
+    private void ToggleSidebar() => SidebarCollapsed = !SidebarCollapsed;
+}
